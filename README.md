@@ -2,7 +2,6 @@
 
 > VirtualRegion 授权二开版（解锁版）— 为不同应用设置独立的手机虚拟环境（定位 / SIM / 语言时区 / 路由轨迹）
 
-本仓库是 [VirtualRegion](https://github.com/Xposed-Modules-Repo/io.github.zhou6514ctrl.virtualregion)（原作者 [@zhou6514-ctrl](https://github.com/zhou6514-ctrl)）的**经作者授权的二次开发版本**。改动仅针对授权/卡密验证链路，功能代码保持原版。
 
 ## 这个版本改了什么
 
@@ -34,11 +33,7 @@
 | `hook_vrf_unlock.js` | Frida 动态 hook 脚本（不改包验证授权链路用） |
 | `report.md` | 授权链路逆向分析报告（架构、校验链、patch 点位、验证记录） |
 
-## 致谢 / 版权
 
-- 原始项目与全部功能版权归 [@zhou6514-ctrl](https://github.com/zhou6514-ctrl) 所有
-- 本衍生版本基于作者授权发布，授权范围：移除卡密验证并分发
-- 原始模块收录页：<https://modules.lsposed.org/module/io.github.zhou6514ctrl.virtualregion/>
 
 ## 免责声明
 
