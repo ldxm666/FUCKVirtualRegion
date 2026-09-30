@@ -1,3 +1,140 @@
+# VirtualRegion 2.0.5 逆向分析与解锁报告
+
+> 分析日期：2026-09-30
+> 工具链：apktool 3.0.2 / jadx 1.5.5 / apksigner（build-tools 36.1.0）/ adb / Python 3.12
+> 真机：小米 2509FPN0BC（Android 16 / arm64-v8a / KernelSU + LSPosed 2.1.1 / API 102）
+> 原始包：`VirtualRegion_2.0.5.apk`（76,849,037 B，SHA-256 `a6f23916ebcda5e03d9147f13b8c022fea784e7e5cc1706f92d33805caf0b1fe`）
+
+## 0. 结论速览
+
+| 产物 | 大小 | SHA-256 |
+|------|------|---------|
+| `VirtualRegion_2.0.5_unlocked.apk`（方案 A） | 76,941,058 B | `c15235e6a07a8d238be6e0958ac4785cbe5ed2bd2c50938edcbb493d7d9dd7b9`（签名证书 CN=revx，SHA-256 `7b34b1252b16a1d69df0aab01e1f065936aa35241b67d84e99f75cc004c09469`） |
+| `VrfPermanent-lsp-v2.2.apk`（方案 B） | 21,096 B | `55d414fcf469daa2050bc7dbed65754a8d37687ed1d937d5a7857ef2dd81aa4a` |
+
+- 卡密弹窗：**已去除**，冷启动直接进「环境与地图」
+- 版本更新弹窗「发现新版本 2.0.6」：**已去除**
+- 授权视图：抽屉卡片 **「授权有效 / 有效期：永久有效」**
+- 系统侧：`system` / `com.android.phone` / `com.android.bluetooth` 三进程各装载 26 个 hook（LSPosed 日志实证）
+- 快照发布：`published_version` 非 0，LSPosed RemotePreferences 组 `virtual_region_snapshot_v1` 写出 24 个键（含 11.6 KB `snapshot_base64`）
+- 保留限制：环境广场**云端**上传/下载仍由服务端验卡（客户端不可解）
+
+## 1. 2.0.5 授权链路（与 1.0.8 完全不同，全部重新定位）
+
+1.0.8 的 `h3.u` / `Lvr/Store;` 在 2.0.5 里**整体重排**，包名换成了可读的 `io.github.zhou6514ctrl.virtualregion.auth.*`
+（类名 `a…z` 单字母，仍是混淆后的形态）。真实调用链：
+
+```
+VirtualRegionApplication:710          -> auth.D#B()                       启动即跑一次离线校验
+auth.D  (licence holder)  field a = auth.v
+    B()  -> d = v.c0(v.t)
+            d.h0() == true  -> v.b0(AUTHORIZED_OFFLINE, "设备已授权", "AUTHORIZED_OFFLINE")
+                              v.X(lease)
+            d.h0() == false -> v.y = false; v.x = err.name(); v.J()
+auth.v                    field t = auth.H(租约信封)   field u = auth.w(状态枚举)   field m = auth.z
+    Z()   ->  !首次安装 || u.b() || u == EXPIRED     == true 就弹「卡密授权」
+    Q()   ->  AuthInfo(u, t.body.i(到期秒), lastVerify, reason)
+    N()   ->  c0(t).h0() ? t : null
+    c0(H) ->  NativeAuthCore.a(H, appSignature, false)  -> native verifyRaw (Ed25519)
+    b0(w,String,String,Z)   唯一状态写入口
+auth.w  a() = u ∈ {AUTHORIZED_ONLINE, AUTHORIZED, AUTHORIZED_OFFLINE}
+        b() = u ∈ {REVOKED, NOT_AUTHORIZED, DEVICE_MISMATCH, UNAUTHORIZED}
+auth.c  验签码枚举：a=OK_ONLINE b=OK_OFFLINE c=ERR_NO_LEASE d=ERR_MALFORMED_LEASE …
+auth.d  验签结果 (EnumC4205c, J, J, J, Z)，h0() = 结果 ∈ {OK_ONLINE, OK_OFFLINE}
+auth.f  租约体 (int, String plan, String keyId, String subject, long, long, long, long, Long)
+auth.H  租约信封 (auth.f, byte[] sig, byte[] key)
+auth.F  提交结果 (auth.d, J)
+auth.NativeAuthCore.a(H,String,Z) -> d     Java 侧唯一 native 验签入口
+c4.x    卡密弹窗：Z()==true 时 a() 才会 show()；标题 R.string.manager_license_authorization
+m3.h    发布器：u.a()==true 且 v.t != null 时才推 LSPosed RemotePreferences
+f4.a    远端版本清单（jadx p219f4.C4036a）；MainActivity 的「发现新版本」只在 a(versionCode) > 205 时构造
+```
+
+### 为什么必须同时改「系统侧」
+
+`ipc` 在系统进程里把快照交给 `NativeSnapshotGate.f/g/h`，这三个 Java 包装内部调用
+`private static native commit(...)`，**在 native 里用 Ed25519 重新验一遍租约**；验不过就
+`ipc.a.a(proc, code)` + `ipc.h.c(reason)` → `REMOTE_RUNTIME_CLEARED`。
+而 native 验签还把**APK 签名**绑进了租约（`NativeAuthCore.a(..., appSignature, false)`），
+所以**重签名后的包永远拿不到一个被接受的租约**——只改 app 侧会出现「界面已授权，功能全不生效」。
+
+## 2. 两个方案的补丁点位
+
+### 方案 A：直接整合进 APK（`patch_vr205.py`）
+
+| 目标 | 改动 | 作用 |
+|------|------|------|
+| `auth/w.smali` | `a()Z` → `const/4 v0,1`；`b()Z` → `const/4 v0,0` | 全部「已授权/被拒绝」判定 |
+| `auth/v.smali` | `Z()Z` → `false` | 卡密弹窗唯一前置条件 |
+| `auth/v.smali` | `c0(H)d` → `d(OK_OFFLINE, FAR, FAR, FAR, true)` | 掐掉 Java 侧唯一 native 验签入口 |
+| `auth/v.smali` | `Q()AuthInfo` → `(AUTHORIZED, 0L, 0L, "AUTHORIZED")` | `expireTime==0` 渲染成「永久有效」 |
+| `auth/v.smali` | `b0(...)` 入口注入 4 条寄存器赋值 | 任何失败回写都被改成 `AUTHORIZED` |
+| `auth/v.smali` | 新增 `private static revxLease()Lauth/H;` + `b0` 里 `t==null` 时补租约 | 发布器 `m3.h` 需要 `v.t != null`，否则系统侧收不到任何东西 |
+| `auth/NativeAuthCore.smali` | `a(H,String,Z)d` → `OK_OFFLINE` | 兜底（别处直接调用 native 包装） |
+| `smali/f4.1/a.smali` | `<init>` 里 `const/4 p1, 0x0` | 远端清单 versionCode 恒 0 → 版本弹窗永不出现 |
+| `auth/NativeSnapshotGate.smali` | 加 `sMod/sReg/sSim` 缓存字段；`f/g/h/e` 改成「缓存入参快照 + 直接回成功」；新增 `aCached()/bCached()/cCached()` | 系统侧 native 门禁放行 |
+| 全树 31 个 smali | `currentModuleSnapshot()` 等调用点重定向到 `aCached()/bCached()/cCached()` | native getter 回放缓存 |
+| `auth/w.smali`: `b0` 的 `const/4 p4` | 同上 | 让 `u.b()` 恒假 |
+| `auth/NativeSnapshotGate`: `a(IJ)Z/b()J/c(I)J` | 直接改 Java 实现 | 清快照返回 true、revision/version 回大值 |
+
+> 注意：`auth/c` 与 `auth/C`、`auth/d` 与 `auth/D` 在 Windows 上**大小写撞名**，apktool 会把其中一个写成
+> `c.1.smali` / `d.1.smali`。改错文件会静默改到另一个类上，重打包才会报错——**先 `Select-String` 确认
+> `.class` 声明的真实类名再用**。
+
+### 方案 B：LSPosed 模块（`VrfUnlockModule.java`，libxposed API 102）
+
+同一批语义，用 hook 实现：
+
+| hook | 替换为 |
+|------|--------|
+| `auth.w#a()Z` / `auth.w#b()Z` | `true` / `false` |
+| `auth.v#Z()Z` | `false` |
+| `auth.v#c0(H)d` / `auth.NativeAuthCore#a(H,String,Z)d` | `d(OK_OFFLINE, FAR…, true)` |
+| `auth.v#b0(...)` | 强制 `AUTHORIZED` + 补自造租约（反射构造 `auth.f` / `auth.H`） |
+| `auth.v#Q()AuthInfo` | `(AUTHORIZED, 0, now, "AUTHORIZED")` |
+| `auth.v#N()auth/H` | 字段 `t`，null 时自造 |
+| `auth.D#B()V` | 空实现 |
+| `f4.a.<init>(I…6×String)` | versionCode 置 0 |
+| `auth.NativeSnapshotGate#f/g/h/e` + `current*Snapshot` | 缓存 + 回成功 |
+
+### 方案 B 踩过的三个坑（都是“看起来该生效但不生效”）
+
+1. **`staticScope=false` + LSPosed 只在首次启用时同步 `scope.list`** → 目标包从未进作用域，
+   模块在 App 进程里**一次都没加载过**（日志里只有 system/bluetooth/phone）。修法：管理器作用域页手动勾。
+2. **宿主 APK 自己也是 libxposed 模块**，在 system 侧进程里它的类由框架的 module class loader 载入；
+   自己 `new PathClassLoader` 只会得到第二份类拷贝，hook 上去是空转。
+   正确姿势：hook `java.lang.ClassLoader.loadClass(String,boolean)` 记录加载
+   `io.github.zhou6514ctrl.virtualregion.hook.core.ModuleEntry` 的那个 loader（日志里 `loader=k1`）。
+3. **只改状态不改租约 = 系统侧永远收不到东西**：发布器条件是 `u.a()==true && v.t != null`，
+   全新解锁的机器 `t` 是 null。必须自造一个格式合法的 `auth.H`。
+
+## 3. 真机验证证据（2026-09-30，设备 975aaf17）
+
+| 项 | 证据 |
+|---|---|
+| 卡密弹窗消失 | 冷启动直接进「环境与地图」，无 `manager_license_authorization` 弹窗 |
+| 版本弹窗消失 | 2.0.6 更新弹窗不再出现（原版会弹） |
+| 授权视图 | 抽屉卡片：`✓ 授权有效` / `有效期：永久有效` |
+| 系统侧注入 | `/data/adb/lspd/log/modules_*.log`：`(system)…hooks_installed process=system hooks=26`、`(com.android.phone)…hooks=26`、`(com.android.bluetooth)…hooks=26`，且 `loader_recorded cls=…hook.core.ModuleEntry loader=k1` |
+| 快照发布 | `/data/data/…/shared_prefs/process_status_v1.xml`：`published_version=1790734124433`（非 0） |
+| 系统侧接收 | LSPosed `module_configs` 表 24 个键，含 `authorization_granted_v1=true`、`authorization_lease_v2`、`snapshot_base64`(11 666 B)、`target_sim_payload_v1`、`regional_payload_v1`、`media_profile_payload_v1`、`hidden_apps_payload_v1` |
+| 崩溃/ANR | 无（`logcat` 无 `FATAL EXCEPTION`，`dumpsys window lastanr` 无记录） |
+| 运行状态页 | 「设置已发布；未运行的系统进程将在启动时自动加载」 |
+
+## 4. 复现与工具
+
+```bash
+# 方案 A
+apktool d VirtualRegion_2.0.5.apk -o vr205
+python patch_vr205.py vr205
+apktool b vr205 -o rebuilt.apk
+zipalign -f -p 4 rebuilt.apk aligned.apk
+apksigner sign --ks revx-test.jks --ks-pass pass:revx123456 --ks-key-alias revx   --out VirtualRegion_2.0.5_unlocked.apk aligned.apk
+adb shell su -c 'pm install -r -d /data/local/tmp/vr.apk'
+```
+
+---
+
 # VirtualRegion 1.0.8 逆向分析与解锁报告
 
 > 分析日期：2026-09-11

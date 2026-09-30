@@ -1,3 +1,5 @@
-﻿*.apk
+*.apk
 *.idsig
 !VirtualRegion_1.0.8_unlocked.apk
+!VirtualRegion_2.0.5_unlocked.apk
+!VrfPermanent-lsp-v2.2.apk
